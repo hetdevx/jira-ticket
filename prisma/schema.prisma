@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model JiraConnection {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  slackTeamId String @map("slack_team_id")
+  slackUserId String @map("slack_user_id")
+
+  atlassianAccountId String? @map("atlassian_account_id")
+  atlassianEmail     String? @map("atlassian_email")
+
+  cloudId   String  @map("cloud_id")
+  cloudName String? @map("cloud_name")
+  cloudUrl  String  @map("cloud_url")
+
+  encryptedAccessToken  String   @map("encrypted_access_token")
+  encryptedRefreshToken String   @map("encrypted_refresh_token")
+  tokenExpiresAt        DateTime @map("token_expires_at") @db.Timestamptz
+
+  scopes String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([slackTeamId, slackUserId])
+  @@map("jira_connections")
+}
+
+model OAuthState {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  state       String @unique
+  slackTeamId String @map("slack_team_id")
+  slackUserId String @map("slack_user_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+
+  @@index([state])
+  @@map("oauth_states")
+}
+
+model PendingTicketPreview {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  slackTeamId    String  @map("slack_team_id")
+  slackUserId    String  @map("slack_user_id")
+  slackChannelId String? @map("slack_channel_id")
+
+  originalText    String @map("original_text")
+  extractedFields Json   @map("extracted_fields")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+
+  @@index([slackTeamId, slackUserId])
+  @@map("pending_ticket_previews")
+}
