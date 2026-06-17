@@ -9,7 +9,7 @@ const ATLASSIAN_AUTH_URL = "https://auth.atlassian.com/authorize";
 const ATLASSIAN_TOKEN_URL = "https://auth.atlassian.com/oauth/token";
 const ATLASSIAN_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources";
 
-const SCOPES = "read:jira-user write:jira-work offline_access";
+const SCOPES = "read:jira-user read:jira-work write:jira-work offline_access";
 
 async function buildJiraAuthUrl({ slackTeamId, slackUserId }) {
   const state = crypto.randomBytes(32).toString("hex");
@@ -80,7 +80,7 @@ async function handleJiraCallback({ code, state }) {
     scopes: scope || SCOPES,
   });
 
-  return `
+  const html = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -104,6 +104,8 @@ async function handleJiraCallback({ code, state }) {
 </body>
 </html>
 `;
+
+  return { html, slackUserId, cloudName: site.name };
 }
 
 async function refreshJiraToken(connection) {

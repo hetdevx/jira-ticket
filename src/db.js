@@ -99,6 +99,16 @@ async function getPendingPreview(id) {
   return prisma.pendingTicketPreview.findUnique({ where: { id } });
 }
 
+async function deleteJiraConnection(slackTeamId, slackUserId) {
+  try {
+    await prisma.jiraConnection.delete({
+      where: { slackTeamId_slackUserId: { slackTeamId, slackUserId } },
+    });
+  } catch {
+    // already removed — safe to ignore
+  }
+}
+
 async function deletePendingPreview(id) {
   try {
     await prisma.pendingTicketPreview.delete({ where: { id } });
@@ -107,13 +117,22 @@ async function deletePendingPreview(id) {
   }
 }
 
+async function updatePendingPreviewFields(id, extractedFields) {
+  return prisma.pendingTicketPreview.update({
+    where: { id },
+    data: { extractedFields },
+  });
+}
+
 module.exports = {
   prisma,
   saveOAuthState,
   consumeOAuthState,
   getJiraConnection,
   upsertJiraConnection,
+  deleteJiraConnection,
   savePendingPreview,
   getPendingPreview,
   deletePendingPreview,
+  updatePendingPreviewFields,
 };

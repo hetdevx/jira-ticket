@@ -37,9 +37,7 @@ function validateJiraFields(fields) {
     description: fields.description.trim(),
     priority: normalizePriority(fields.priority),
     issueType: normalizeIssueType(fields.issueType),
-    projectKey: (fields.projectKey || process.env.DEFAULT_JIRA_PROJECT_KEY || "WEB")
-      .trim()
-      .toUpperCase(),
+    projectKey: (process.env.DEFAULT_JIRA_PROJECT_KEY || "WEB").trim().toUpperCase(),
   };
 
   return normalized;
