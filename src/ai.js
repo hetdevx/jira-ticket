@@ -13,7 +13,8 @@ Respond ONLY with valid JSON matching this schema:
   "summary": "short Jira issue title (max 255 chars)",
   "description": "clear Jira issue description",
   "priority": "Highest | High | Medium | Low | Lowest",
-  "issueType": "Task | Bug | Story"
+  "issueType": "Task | Bug | Story",
+  "projectKey": "Jira project key if explicitly mentioned, otherwise null"
 }
 
 Rules:
@@ -21,6 +22,7 @@ Rules:
 - description must expand on the summary with relevant details
 - priority defaults to Medium if not specified
 - issueType defaults to Task if not specified
+- projectKey must only be set when the user explicitly mentions a project key such as WEB, APP, or QA
 - Do not include any explanation, markdown, or extra text — only the JSON object`;
 
 async function extractJiraFields(inputText) {

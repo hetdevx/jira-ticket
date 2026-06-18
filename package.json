@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "node src/app.js",
     "start": "node src/app.js",
+    "check": "node --check src/app.js && node --check src/jira.js && node --check src/jiraOAuth.js && node --check src/ai.js && node --check src/validators.js && node --check src/db.js && node --check src/crypto.js",
+    "test": "node --test",
     "migrate": "npx prisma migrate deploy",
     "migrate:dev": "npx prisma migrate dev",
     "generate": "npx prisma generate",

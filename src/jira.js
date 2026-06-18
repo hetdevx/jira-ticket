@@ -7,6 +7,7 @@ const { refreshJiraToken } = require("./jiraOAuth");
 
 // Treat token as expired if it expires within the next 2 minutes
 const EXPIRY_BUFFER_MS = 2 * 60 * 1000;
+const refreshLocks = new Map();
 
 function isTokenExpired(tokenExpiresAt) {
   return new Date(tokenExpiresAt).getTime() < Date.now() + EXPIRY_BUFFER_MS;
@@ -25,6 +26,63 @@ function buildAdf(text) {
   };
 }
 
+function getConnectionKey(connection) {
+  return connection.id || `${connection.slackTeamId}:${connection.slackUserId}`;
+}
+
+async function refreshConnection(connection) {
+  const key = getConnectionKey(connection);
+  if (refreshLocks.has(key)) {
+    return refreshLocks.get(key);
+  }
+
+  const refreshPromise = refreshJiraToken(connection).finally(() => {
+    refreshLocks.delete(key);
+  });
+  refreshLocks.set(key, refreshPromise);
+  return refreshPromise;
+}
+
+async function ensureFreshConnection(connection) {
+  if (!isTokenExpired(connection.tokenExpiresAt)) {
+    return connection;
+  }
+  return refreshConnection(connection);
+}
+
+async function jiraRequest(connection, config) {
+  let activeConnection = await ensureFreshConnection(connection);
+  let accessToken = decrypt(activeConnection.encryptedAccessToken);
+
+  try {
+    const response = await axios.request({
+      ...config,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+        ...(config.headers || {}),
+      },
+    });
+    return { response, connection: activeConnection };
+  } catch (err) {
+    if (err.response?.status !== 401) {
+      throw err;
+    }
+
+    activeConnection = await refreshConnection(activeConnection);
+    accessToken = decrypt(activeConnection.encryptedAccessToken);
+    const response = await axios.request({
+      ...config,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+        ...(config.headers || {}),
+      },
+    });
+    return { response, connection: activeConnection };
+  }
+}
+
 async function createJiraIssueForUser({ slackTeamId, slackUserId, fields }) {
   let connection = await getJiraConnection(slackTeamId, slackUserId);
 
@@ -33,12 +91,6 @@ async function createJiraIssueForUser({ slackTeamId, slackUserId, fields }) {
     err.code = "JIRA_NOT_CONNECTED";
     throw err;
   }
-
-  if (isTokenExpired(connection.tokenExpiresAt)) {
-    connection = await refreshJiraToken(connection);
-  }
-
-  const accessToken = decrypt(connection.encryptedAccessToken);
 
   const url = `https://api.atlassian.com/ex/jira/${connection.cloudId}/rest/api/3/issue`;
 
@@ -56,13 +108,16 @@ async function createJiraIssueForUser({ slackTeamId, slackUserId, fields }) {
 
   let response;
   try {
-    response = await axios.post(url, payload, {
+    const result = await jiraRequest(connection, {
+      method: "POST",
+      url,
+      data: payload,
       headers: {
-        Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
-        Accept: "application/json",
       },
     });
+    response = result.response;
+    connection = result.connection;
   } catch (err) {
     const errors = err.response?.data?.errors || {};
     const messages = err.response?.data?.errorMessages || [];
@@ -94,21 +149,12 @@ async function createJiraIssueForUser({ slackTeamId, slackUserId, fields }) {
 }
 
 async function getJiraProjects(connection) {
-  if (isTokenExpired(connection.tokenExpiresAt)) {
-    connection = await refreshJiraToken(connection);
-  }
-
-  const accessToken = decrypt(connection.encryptedAccessToken);
   const url = `https://api.atlassian.com/ex/jira/${connection.cloudId}/rest/api/3/project/search?maxResults=50&orderBy=NAME`;
 
   let response;
   try {
-    response = await axios.get(url, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-      },
-    });
+    const result = await jiraRequest(connection, { method: "GET", url });
+    response = result.response;
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error("[Jira getProjects error]", JSON.stringify(detail));
@@ -126,17 +172,12 @@ async function getJiraAssignableUsers(connection, projectKey) {
     return [];
   }
 
-  const accessToken = decrypt(connection.encryptedAccessToken);
   const url = `https://api.atlassian.com/ex/jira/${connection.cloudId}/rest/api/3/user/assignable/search?project=${encodeURIComponent(projectKey)}&maxResults=50`;
 
   let response;
   try {
-    response = await axios.get(url, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-      },
-    });
+    const result = await jiraRequest(connection, { method: "GET", url });
+    response = result.response;
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error("[Jira getAssignableUsers error]", JSON.stringify(detail));
@@ -151,12 +192,9 @@ async function getJiraAssignableUsers(connection, projectKey) {
 
 async function getJiraProjectIssueTypes(connection, projectKey) {
   if (!projectKey) return [];
-  const accessToken = decrypt(connection.encryptedAccessToken);
   const url = `https://api.atlassian.com/ex/jira/${connection.cloudId}/rest/api/3/project/${encodeURIComponent(projectKey)}`;
   try {
-    const response = await axios.get(url, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-    });
+    const { response } = await jiraRequest(connection, { method: "GET", url });
     return (response.data.issueTypes || [])
       .filter((t) => !t.subtask)
       .map((t) => ({ id: t.id, name: t.name }));

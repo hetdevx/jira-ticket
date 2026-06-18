@@ -2,6 +2,7 @@
 
 require("dotenv").config();
 
+const crypto = require("crypto");
 const { App, ExpressReceiver } = require("@slack/bolt");
 const axios = require("axios");
 const { buildJiraAuthUrl, handleJiraCallback } = require("./jiraOAuth");
@@ -18,6 +19,22 @@ const { createJiraIssueForUser, getJiraProjects, getJiraAssignableUsers, getJira
 
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
+  customPropertiesExtractor: (req) => {
+    console.log("[Slack request]", {
+      path: req.path,
+      type: req.body?.type || req.body?.command || req.body?.payload?.type,
+      event: req.body?.event?.type,
+    });
+    return {};
+  },
+  processEventErrorHandler: async ({ error, body }) => {
+    console.error("[Slack event processing error]", {
+      error: error.message,
+      type: body?.type,
+      event: body?.event?.type,
+    });
+    return true;
+  },
 });
 
 const app = new App({
@@ -36,18 +53,19 @@ expressApp.get("/health", (_req, res) => {
 // ─── Jira OAuth: start ───────────────────────────────────────────────────────
 
 expressApp.get("/auth/jira/start", async (req, res) => {
-  const { team_id, user_id } = req.query;
+  const { token } = req.query;
 
-  if (!team_id || !user_id) {
-    return res.status(400).send("Missing team_id or user_id");
+  if (!token) {
+    return res.status(400).send("Missing connect token");
   }
 
   try {
-    const authUrl = await buildJiraAuthUrl({ slackTeamId: team_id, slackUserId: user_id });
+    const { slackTeamId, slackUserId } = verifyConnectToken(token);
+    const authUrl = await buildJiraAuthUrl({ slackTeamId, slackUserId });
     return res.redirect(authUrl);
   } catch (err) {
     console.error("[OAuth start error]", err.message);
-    return res.status(500).send("Failed to start Jira OAuth. Please try again.");
+    return res.status(400).send("Failed to start Jira OAuth. Please try again from Slack.");
   }
 });
 
@@ -73,11 +91,11 @@ expressApp.get("/auth/jira/callback", async (req, res) => {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `:white_check_mark: *You're connected to Jira!*\n\nYour account has been linked to *${cloudName}*. You can now create tickets directly from Slack.\n\nRun \`/jira-ticket <your request>\` to get started.`,
+              text: `:white_check_mark: *You're connected to Jira!*\n\nYour account has been linked to *${cloudName}*. You can now create tickets directly from Slack.\n\nRun \`/jira-ticket <your request>\` or mention me in a channel to get started.`,
             },
           },
         ],
-        text: `You're now connected to Jira (${cloudName}). Run /jira-ticket to create tickets.`,
+        text: `You're now connected to Jira (${cloudName}). Run /jira-ticket or mention the bot to create tickets.`,
       });
     } catch (dmErr) {
       console.error("[Slack DM error]", dmErr.message);
@@ -88,7 +106,7 @@ expressApp.get("/auth/jira/callback", async (req, res) => {
     console.error("[OAuth callback error]", err.message);
     return res
       .status(400)
-      .send(`<h2>Connection failed</h2><p>${err.message}</p><p>Please close this tab and try again from Slack.</p>`);
+      .send(`<h2>Connection failed</h2><p>${escapeHtml(err.message)}</p><p>Please close this tab and try again from Slack.</p>`);
   }
 });
 
@@ -107,73 +125,76 @@ app.command("/jira-ticket", async ({ command, ack, respond }) => {
     return;
   }
 
-  // Check Jira connection
-  const connection = await getJiraConnection(team_id, user_id);
-  if (!connection) {
-    const connectUrl = `${process.env.APP_BASE_URL}/auth/jira/start?team_id=${team_id}&user_id=${user_id}`;
-    await respond({
-      response_type: "ephemeral",
+  await createTicketPreview({
+    slackTeamId: team_id,
+    slackUserId: user_id,
+    slackChannelId: channel_id,
+    inputText: text.trim(),
+    respond,
+  });
+});
+
+// ─── app mention: @Jira Ticket Bot create ... ───────────────────────────────
+
+app.event("app_mention", async ({ event, body, client }) => {
+  const slackTeamId = body.team_id || event.team;
+  const slackUserId = event.user;
+  const slackChannelId = event.channel;
+  const promptText = stripSlackMentions(event.text);
+  const threadTs = event.thread_ts || event.ts;
+
+  console.log("[Slack app_mention]", {
+    team: slackTeamId,
+    channel: slackChannelId,
+    user: slackUserId,
+    ts: event.ts,
+    hasThread: Boolean(event.thread_ts),
+  });
+
+  if (!promptText) {
+    await safePostEphemeral(client, {
+      channel: slackChannelId,
+      user: slackUserId,
+      thread_ts: threadTs,
+      text: "Please include the ticket details after mentioning me.",
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: ":link: *Connect your Jira account to create tickets from Slack.*",
+            text: "Please include the ticket details after mentioning me.\n*Example:* `@Jira Ticket Bot create high priority task to improve storefront SEO page titles. Project WEB.`",
           },
-        },
-        {
-          type: "actions",
-          elements: [
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Connect Jira", emoji: true },
-              url: connectUrl,
-              style: "primary",
-              action_id: "connect_jira_link",
-            },
-          ],
         },
       ],
     });
     return;
   }
 
-  // Extract fields with AI and fetch projects in parallel
-  let fields, projects;
-  try {
-    [fields, projects] = await Promise.all([
-      extractJiraFields(text.trim()),
-      getJiraProjects(connection),
-    ]);
-  } catch (err) {
-    console.error("[AI extraction error]", err.message);
-    await respond({
-      response_type: "ephemeral",
-      text: `:warning: Could not extract ticket fields: ${err.message}`,
-    });
-    return;
-  }
-
-  const firstProjectKey = projects.length > 0 ? projects[0].key : null;
-  const [assignees, issueTypes] = await Promise.all([
-    getJiraAssignableUsers(connection, firstProjectKey).catch(() => []),
-    getJiraProjectIssueTypes(connection, firstProjectKey).catch(() => []),
-  ]);
-
-  // Save pending preview (expires in 15 minutes)
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-  const preview = await savePendingPreview({
-    slackTeamId: team_id,
-    slackUserId: user_id,
-    slackChannelId: channel_id,
-    originalText: text.trim(),
-    extractedFields: fields,
-    expiresAt,
+  await safePostMessage(client, {
+    channel: slackChannelId,
+    thread_ts: threadTs,
+    text: "I’m preparing a Jira ticket preview for you.",
   });
 
-  await respond({
-    response_type: "ephemeral",
-    blocks: buildPreviewBlocks(fields, preview.id, projects, assignees, issueTypes, firstProjectKey, null, null, text.trim()),
+  const threadContext = await getMentionThreadContext({ client, event });
+  const inputText = threadContext
+    ? `${promptText}\n\nSlack thread context:\n${threadContext}`
+    : promptText;
+
+  await createTicketPreview({
+    slackTeamId,
+    slackUserId,
+    slackChannelId,
+    inputText,
+    displayText: promptText,
+    respond: (message) =>
+      safePostEphemeral(client, {
+        channel: slackChannelId,
+        user: slackUserId,
+        thread_ts: threadTs,
+        text: message.text || "Jira ticket preview",
+        blocks: message.blocks,
+      }),
   });
 });
 
@@ -498,9 +519,271 @@ app.action("cancel_jira_ticket", async ({ action, ack, respond }) => {
 
 const PRIORITY_OPTIONS = ["Highest", "High", "Medium", "Low", "Lowest"];
 const FALLBACK_ISSUETYPE_OPTIONS = ["Task", "Bug", "Story"];
+const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
+const SLACK_SECTION_TEXT_LIMIT = 3000;
+const SLACK_CONTEXT_TEXT_LIMIT = 3000;
+const SLACK_FIELD_TEXT_LIMIT = 2000;
+const SLACK_SELECT_OPTION_LIMIT = 100;
+const THREAD_CONTEXT_MESSAGE_LIMIT = 10;
+const THREAD_CONTEXT_CHAR_LIMIT = 5000;
+const CHANNEL_CONTEXT_MESSAGE_LIMIT = 10;
+const CHANNEL_CONTEXT_CHAR_LIMIT = 5000;
+
+async function createTicketPreview({
+  slackTeamId,
+  slackUserId,
+  slackChannelId,
+  inputText,
+  displayText = inputText,
+  respond,
+}) {
+  const connection = await getJiraConnection(slackTeamId, slackUserId);
+  if (!connection) {
+    await respond(buildConnectMessage(slackTeamId, slackUserId));
+    return;
+  }
+
+  let fields, projects;
+  try {
+    [fields, projects] = await Promise.all([
+      extractJiraFields(inputText),
+      getJiraProjects(connection),
+    ]);
+  } catch (err) {
+    console.error("[Ticket preview error]", err.message);
+    await respond({
+      response_type: "ephemeral",
+      text: `:warning: Could not prepare ticket preview: ${err.message}`,
+    });
+    return;
+  }
+
+  const selectedProjectKey = chooseInitialProjectKey(fields, projects);
+  const [assignees, issueTypes] = await Promise.all([
+    getJiraAssignableUsers(connection, selectedProjectKey).catch(() => []),
+    getJiraProjectIssueTypes(connection, selectedProjectKey).catch(() => []),
+  ]);
+
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  const preview = await savePendingPreview({
+    slackTeamId,
+    slackUserId,
+    slackChannelId,
+    originalText: displayText,
+    extractedFields: fields,
+    expiresAt,
+  });
+
+  await respond({
+    response_type: "ephemeral",
+    text: "Jira ticket preview",
+    blocks: buildPreviewBlocks(
+      fields,
+      preview.id,
+      projects,
+      assignees,
+      issueTypes,
+      selectedProjectKey,
+      null,
+      null,
+      displayText
+    ),
+  });
+}
+
+function buildConnectMessage(slackTeamId, slackUserId) {
+  const token = buildConnectToken({ slackTeamId, slackUserId });
+  const connectUrl = `${process.env.APP_BASE_URL}/auth/jira/start?token=${encodeURIComponent(token)}`;
+
+  return {
+    response_type: "ephemeral",
+    text: "Connect your Jira account to create tickets from Slack.",
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: ":link: *Connect your Jira account to create tickets from Slack.*",
+        },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Connect Jira", emoji: true },
+            url: connectUrl,
+            style: "primary",
+            action_id: "connect_jira_link",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function stripSlackMentions(text) {
+  return String(text || "")
+    .replace(/<@[A-Z0-9]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function getMentionThreadContext({ client, event }) {
+  const threadTs = event.thread_ts;
+  if (!threadTs) {
+    return getMentionChannelContext({ client, event });
+  }
+
+  try {
+    const response = await client.conversations.replies({
+      channel: event.channel,
+      ts: threadTs,
+      limit: THREAD_CONTEXT_MESSAGE_LIMIT,
+    });
+
+    return (response.messages || [])
+      .filter((message) => message.text && message.ts !== event.ts)
+      .map((message) => `- ${stripSlackMentions(message.text)}`)
+      .join("\n")
+      .slice(0, THREAD_CONTEXT_CHAR_LIMIT)
+      .trim();
+  } catch (err) {
+    console.error("[Slack thread context error]", err.data?.error || err.message);
+    return "";
+  }
+}
+
+async function getMentionChannelContext({ client, event }) {
+  try {
+    const response = await client.conversations.history({
+      channel: event.channel,
+      latest: event.ts,
+      inclusive: false,
+      limit: CHANNEL_CONTEXT_MESSAGE_LIMIT,
+    });
+
+    return (response.messages || [])
+      .filter((message) => message.text && !message.bot_id)
+      .reverse()
+      .map((message) => `- ${stripSlackMentions(message.text)}`)
+      .join("\n")
+      .slice(0, CHANNEL_CONTEXT_CHAR_LIMIT)
+      .trim();
+  } catch (err) {
+    console.error("[Slack channel context error]", err.data?.error || err.message);
+    return "";
+  }
+}
+
+async function safePostMessage(client, message) {
+  try {
+    return await client.chat.postMessage(message);
+  } catch (err) {
+    console.error("[Slack postMessage error]", err.data?.error || err.message);
+    return null;
+  }
+}
+
+async function safePostEphemeral(client, message) {
+  try {
+    return await client.chat.postEphemeral(message);
+  } catch (err) {
+    const reason = err.data?.error || err.message;
+    console.error("[Slack postEphemeral error]", reason);
+
+    try {
+      return await client.chat.postMessage({
+        channel: message.channel,
+        thread_ts: message.thread_ts,
+        text: `I could not send the private Jira preview. Slack error: ${reason}`,
+      });
+    } catch (fallbackErr) {
+      console.error("[Slack postEphemeral fallback error]", fallbackErr.data?.error || fallbackErr.message);
+      return null;
+    }
+  }
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  const suffix = "... [truncated]";
+  return `${text.slice(0, Math.max(0, maxLength - suffix.length))}${suffix}`;
+}
+
+function getConnectSecret() {
+  const secret = process.env.SLACK_SIGNING_SECRET;
+  if (!secret) {
+    throw new Error("SLACK_SIGNING_SECRET is required to build Jira connect links");
+  }
+  return secret;
+}
+
+function signConnectPayload(payload) {
+  return crypto.createHmac("sha256", getConnectSecret()).update(payload).digest("base64url");
+}
+
+function buildConnectToken({ slackTeamId, slackUserId }) {
+  const payload = Buffer.from(
+    JSON.stringify({
+      slackTeamId,
+      slackUserId,
+      exp: Date.now() + CONNECT_TOKEN_TTL_MS,
+    })
+  ).toString("base64url");
+  return `${payload}.${signConnectPayload(payload)}`;
+}
+
+function verifyConnectToken(token) {
+  const [payload, signature] = String(token).split(".");
+  if (!payload || !signature) {
+    throw new Error("Invalid Jira connect token");
+  }
+
+  const expected = signConnectPayload(payload);
+  const signatureBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (
+    signatureBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
+  ) {
+    throw new Error("Invalid Jira connect token signature");
+  }
+
+  const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  if (!parsed.slackTeamId || !parsed.slackUserId || !parsed.exp || Date.now() > parsed.exp) {
+    throw new Error("Expired Jira connect token");
+  }
+
+  return parsed;
+}
+
+function chooseInitialProjectKey(fields, projects) {
+  if (!projects.length) return null;
+
+  const validKeys = new Set(projects.map((p) => p.key.toUpperCase()));
+  const candidates = [
+    fields.projectKey,
+    process.env.DEFAULT_JIRA_PROJECT_KEY,
+  ]
+    .filter(Boolean)
+    .map((key) => String(key).trim().toUpperCase());
+
+  return candidates.find((key) => validKeys.has(key)) || projects[0].key;
+}
 
 function makeOption(text, value) {
-  return { text: { type: "plain_text", text, emoji: true }, value };
+  return { text: { type: "plain_text", text: truncateText(text, 75), emoji: true }, value };
 }
 
 function findInitialOption(options, currentValue) {
@@ -511,11 +794,11 @@ function findInitialOption(options, currentValue) {
 function buildPreviewBlocks(fields, previewId, projects = [], assignees = [], issueTypes = [], selectedProjectKey = null, selectedAssigneeId = null, selectedDuedate = null, originalText = "") {
   const projectOptions = projects.map((p) =>
     makeOption(`${p.name} (${p.key})`, p.key)
-  );
+  ).slice(0, SLACK_SELECT_OPTION_LIMIT);
 
   const priorityOptions = PRIORITY_OPTIONS.map((p) => makeOption(p, p));
   const issueTypeNames = issueTypes.length > 0 ? issueTypes.map((t) => t.name) : FALLBACK_ISSUETYPE_OPTIONS;
-  const issueTypeOptions = issueTypeNames.map((t) => makeOption(t, t));
+  const issueTypeOptions = issueTypeNames.map((t) => makeOption(t, t)).slice(0, SLACK_SELECT_OPTION_LIMIT);
 
   const blocks = [
     {
@@ -527,7 +810,7 @@ function buildPreviewBlocks(fields, previewId, projects = [], assignees = [], is
       elements: [
         {
           type: "mrkdwn",
-          text: `:speech_balloon: *Your request:* ${originalText}`,
+          text: truncateText(`:speech_balloon: *Your request:* ${originalText}`, SLACK_CONTEXT_TEXT_LIMIT),
         },
       ],
     },
@@ -537,12 +820,12 @@ function buildPreviewBlocks(fields, previewId, projects = [], assignees = [], is
     {
       type: "section",
       fields: [
-        { type: "mrkdwn", text: `*Summary:*\n${fields.summary}` },
+        { type: "mrkdwn", text: truncateText(`*Summary:*\n${fields.summary}`, SLACK_FIELD_TEXT_LIMIT) },
       ],
     },
     {
       type: "section",
-      text: { type: "mrkdwn", text: `*Description:*\n${fields.description}` },
+      text: { type: "mrkdwn", text: truncateText(`*Description:*\n${fields.description}`, SLACK_SECTION_TEXT_LIMIT) },
     },
   ];
 
@@ -572,16 +855,16 @@ function buildPreviewBlocks(fields, previewId, projects = [], assignees = [], is
     },
   });
 
-  // Assignee select — preselect first real user by default
+  // Assignee select
   if (assignees.length > 0) {
     const unassignedOption = makeOption("Unassigned", "unassigned");
     const assigneeOptions = [
       unassignedOption,
       ...assignees.map((a) => makeOption(a.displayName, a.accountId)),
-    ];
+    ].slice(0, SLACK_SELECT_OPTION_LIMIT);
     const defaultAssignee = selectedAssigneeId
       ? assigneeOptions.find((o) => o.value === selectedAssigneeId) || assigneeOptions[1] || unassignedOption
-      : assigneeOptions[1] || unassignedOption; // preselect first real user
+      : unassignedOption;
     blocks.push({
       type: "section",
       block_id: "assignee_block",
@@ -666,6 +949,23 @@ function buildPreviewBlocks(fields, previewId, projects = [], assignees = [], is
 const PORT = process.env.PORT || 3000;
 
 (async () => {
-  await app.start(PORT);
-  console.log(`⚡ slack-jira-ticket-bot running on port ${PORT}`);
+  try {
+    await app.start(PORT);
+    console.log(`⚡ slack-jira-ticket-bot running on port ${PORT}`);
+  } catch (err) {
+    if (err.data?.error === "invalid_auth" || err.data?.error === "account_inactive") {
+      console.error(
+        [
+          "Slack authentication failed.",
+          `Reason: ${err.data.error}`,
+          "Check SLACK_BOT_TOKEN in .env. It must be the Bot User OAuth Token for the installed Slack app and should start with xoxb-.",
+          "After changing Slack scopes or reinstalling the app, copy the new token and restart the server.",
+        ].join("\n")
+      );
+      process.exit(1);
+    }
+
+    console.error("[Startup error]", err);
+    process.exit(1);
+  }
 })();

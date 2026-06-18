@@ -81,16 +81,27 @@ npm run migrate
 3. In **OAuth & Permissions → Scopes → Bot Token Scopes**, add:
    - `commands`
    - `chat:write`
+   - `app_mentions:read`
+   - `channels:history` (optional, used to include public-channel thread or recent-channel context)
+   - `groups:history` (optional, used to include private-channel thread or recent-channel context)
 4. Click **Install to Workspace** and copy the **Bot User OAuth Token** → `SLACK_BOT_TOKEN`.
 5. From **Basic Information**, copy the **Signing Secret** → `SLACK_SIGNING_SECRET`.
 6. In **Slash Commands**, click **Create New Command**:
    - Command: `/jira-ticket`
    - Request URL: `${APP_BASE_URL}/slack/events`
    - Short Description: `Create a Jira ticket from natural language`
-7. In **Interactivity & Shortcuts**:
+7. Create another slash command:
+   - Command: `/jira-disconnect`
+   - Request URL: `${APP_BASE_URL}/slack/events`
+   - Short Description: `Disconnect your Jira account`
+8. In **Interactivity & Shortcuts**:
    - Toggle **Interactivity** on.
    - Request URL: `${APP_BASE_URL}/slack/events`
-8. Reinstall the app after saving changes.
+9. In **Event Subscriptions**:
+   - Toggle **Enable Events** on.
+   - Request URL: `${APP_BASE_URL}/slack/events`
+   - Under **Subscribe to bot events**, add `app_mention`
+10. Reinstall the app after saving changes.
 
 ---
 
@@ -105,11 +116,15 @@ npm run migrate
    ```
 5. In **Permissions**, add the **Jira API** and enable these scopes:
    - `read:jira-user`
+   - `read:jira-work`
    - `write:jira-work`
-   - `offline_access`
 6. From **Settings**, copy:
    - **Client ID** → `ATLASSIAN_CLIENT_ID`
    - **Secret** → `ATLASSIAN_CLIENT_SECRET`
+
+The app also sends `offline_access` in the OAuth authorization URL so Atlassian returns refresh tokens. This usually does not appear as a Jira permission checkbox in the Atlassian Developer Console.
+
+For internal testing, make sure the Atlassian OAuth app is available to the users who will connect Jira. If users cannot complete consent, check the app distribution/settings in Atlassian Developer Console.
 
 ---
 
@@ -181,6 +196,18 @@ npm run migrate:dev   # create DB tables
 npm run dev           # start the bot
 ```
 
+The Prisma schema lives in `prisma/schema.prisma`, and the application DB wrapper is `src/db.js`.
+
+---
+
+## Jira permissions and site selection
+
+This bot creates Jira issues using the connected Atlassian user's OAuth token.
+
+The connected Jira user must have permission to create issues in the selected Jira project. If the user cannot create the issue manually in Jira, the bot also cannot create it for them.
+
+If a user has access to multiple Jira Cloud sites, this MVP uses the first accessible Jira site returned by Atlassian. In production, add a Jira site picker so users can choose the intended site during connection.
+
 ---
 
 ## ngrok setup (expose local server to Slack)
@@ -210,6 +237,16 @@ Copy the `https://...ngrok.io` URL and:
 ```
 /jira-ticket Create a high priority task to improve Storefront QA Agent dashboard. It should show page title, SEO score, meta description and performance score. Project WEB.
 ```
+
+You can also mention the bot in a channel:
+
+```
+@Jira Ticket Bot create a high priority task to improve storefront SEO page titles. Project WEB.
+```
+
+When you mention the bot inside a thread, it will try to include recent thread messages as context if the Slack app has the relevant history scope for that channel type.
+
+When you mention the bot in a normal channel message, it will try to include up to 10 recent messages before the mention. The bot must be invited to the channel, and the Slack app must have `channels:history` for public channels or `groups:history` for private channels.
 
 **Step 2 — Connect Jira** (first time only):
 - Bot shows a **Connect Jira** button.

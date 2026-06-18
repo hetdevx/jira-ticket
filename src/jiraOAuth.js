@@ -11,6 +11,15 @@ const ATLASSIAN_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessibl
 
 const SCOPES = "read:jira-user read:jira-work write:jira-work offline_access";
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function buildJiraAuthUrl({ slackTeamId, slackUserId }) {
   const state = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
@@ -63,6 +72,7 @@ async function handleJiraCallback({ code, state }) {
 
   // Pick the first resource for MVP
   const site = resources[0];
+  const escapedSiteName = escapeHtml(site.name);
 
   const tokenExpiresAt = new Date(Date.now() + expires_in * 1000);
 
@@ -99,7 +109,7 @@ async function handleJiraCallback({ code, state }) {
   <div class="card">
     <div class="icon">&#10003;</div>
     <h1>Jira Connected!</h1>
-    <p>Your Jira account (<strong>${site.name}</strong>) has been connected successfully.<br/>You can close this tab and return to Slack.</p>
+    <p>Your Jira account (<strong>${escapedSiteName}</strong>) has been connected successfully.<br/>You can close this tab and return to Slack.</p>
   </div>
 </body>
 </html>
