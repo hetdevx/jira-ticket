@@ -27,6 +27,21 @@ function normalizeProjectKey(projectKey) {
   return /^[A-Z][A-Z0-9_]{1,9}$/.test(key) ? key : "WEB";
 }
 
+function normalizeAssigneeName(assigneeName) {
+  const name = String(assigneeName || "").trim();
+  return name || null;
+}
+
+function normalizeDueDate(dueDate) {
+  const value = String(dueDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date.toISOString().slice(0, 10) === value ? value : null;
+}
+
 function validateJiraFields(fields) {
   if (!fields || typeof fields !== "object") {
     throw new Error("AI returned invalid fields: expected an object");
@@ -49,9 +64,18 @@ function validateJiraFields(fields) {
     priority: normalizePriority(fields.priority),
     issueType: normalizeIssueType(fields.issueType),
     projectKey: normalizeProjectKey(fields.projectKey),
+    assigneeName: normalizeAssigneeName(fields.assigneeName),
+    duedate: normalizeDueDate(fields.dueDate || fields.duedate),
   };
 
   return normalized;
 }
 
-module.exports = { validateJiraFields, normalizePriority, normalizeIssueType, normalizeProjectKey };
+module.exports = {
+  validateJiraFields,
+  normalizePriority,
+  normalizeIssueType,
+  normalizeProjectKey,
+  normalizeAssigneeName,
+  normalizeDueDate,
+};

@@ -238,6 +238,12 @@ Copy the `https://...ngrok.io` URL and:
 /jira-ticket Create a high priority task to improve Storefront QA Agent dashboard. It should show page title, SEO score, meta description and performance score. Project WEB.
 ```
 
+You can include assignee and due date hints:
+
+```
+/jira-ticket Create high priority task to improve storefront SEO page titles. Due date 30 June. Assign to Het.
+```
+
 You can also mention the bot in a channel:
 
 ```

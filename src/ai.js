@@ -14,7 +14,9 @@ Respond ONLY with valid JSON matching this schema:
   "description": "clear Jira issue description",
   "priority": "Highest | High | Medium | Low | Lowest",
   "issueType": "Task | Bug | Story",
-  "projectKey": "Jira project key if explicitly mentioned, otherwise null"
+  "projectKey": "Jira project key if explicitly mentioned, otherwise null",
+  "assigneeName": "assignee name if explicitly mentioned, otherwise null",
+  "dueDate": "due date in YYYY-MM-DD format if explicitly mentioned, otherwise null"
 }
 
 Rules:
@@ -23,6 +25,8 @@ Rules:
 - priority defaults to Medium if not specified
 - issueType defaults to Task if not specified
 - projectKey must only be set when the user explicitly mentions a project key such as WEB, APP, or QA
+- assigneeName must only be set when the user explicitly asks to assign the ticket to someone
+- dueDate must only be set when the user explicitly mentions a due date
 - Do not include any explanation, markdown, or extra text — only the JSON object`;
 
 async function extractJiraFields(inputText) {

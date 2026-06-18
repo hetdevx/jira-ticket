@@ -285,6 +285,11 @@ app.action("create_jira_ticket", async ({ action, body, ack, respond }) => {
 
   // Re-read preview to get latest extractedFields (may have been updated via modal)
   const latestPreview = await getPendingPreview(previewId);
+  const assigneeAccountId =
+    selectedAssignee && selectedAssignee !== "unassigned"
+      ? selectedAssignee
+      : latestPreview.extractedFields.assigneeAccountId;
+  const duedate = selectedDuedate || latestPreview.extractedFields.duedate;
 
   let issue;
   try {
@@ -296,8 +301,8 @@ app.action("create_jira_ticket", async ({ action, body, ack, respond }) => {
         projectKey: selectedProjectKey,
         ...(selectedPriority && { priority: selectedPriority }),
         ...(selectedIssueType && { issueType: selectedIssueType }),
-        ...(selectedAssignee && selectedAssignee !== "unassigned" && { assigneeAccountId: selectedAssignee }),
-        ...(selectedDuedate && { duedate: selectedDuedate }),
+        ...(assigneeAccountId && { assigneeAccountId }),
+        ...(duedate && { duedate }),
       },
     });
   } catch (err) {
@@ -563,6 +568,12 @@ async function createTicketPreview({
     getJiraAssignableUsers(connection, selectedProjectKey).catch(() => []),
     getJiraProjectIssueTypes(connection, selectedProjectKey).catch(() => []),
   ]);
+  const selectedAssigneeId = findMatchingAssigneeId(assignees, fields.assigneeName);
+  const selectedDuedate = fields.duedate || null;
+  const previewFields = {
+    ...fields,
+    ...(selectedAssigneeId && { assigneeAccountId: selectedAssigneeId }),
+  };
 
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
   const preview = await savePendingPreview({
@@ -570,7 +581,7 @@ async function createTicketPreview({
     slackUserId,
     slackChannelId,
     originalText: displayText,
-    extractedFields: fields,
+    extractedFields: previewFields,
     expiresAt,
   });
 
@@ -578,14 +589,14 @@ async function createTicketPreview({
     response_type: "ephemeral",
     text: "Jira ticket preview",
     blocks: buildPreviewBlocks(
-      fields,
+      previewFields,
       preview.id,
       projects,
       assignees,
       issueTypes,
       selectedProjectKey,
-      null,
-      null,
+      selectedAssigneeId,
+      selectedDuedate,
       displayText
     ),
   });
@@ -780,6 +791,43 @@ function chooseInitialProjectKey(fields, projects) {
     .map((key) => String(key).trim().toUpperCase());
 
   return candidates.find((key) => validKeys.has(key)) || projects[0].key;
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findMatchingAssigneeId(assignees, assigneeName) {
+  const query = normalizeSearchText(assigneeName);
+  if (!query) return null;
+
+  const queryTokens = query.split(/\s+/).filter(Boolean);
+  if (!queryTokens.length) return null;
+
+  const scored = assignees
+    .map((assignee) => {
+      const name = normalizeSearchText(assignee.displayName);
+      const compactName = name.replace(/\s+/g, "");
+      const compactQuery = query.replace(/\s+/g, "");
+      const tokens = name.split(/\s+/).filter(Boolean);
+      let score = 0;
+
+      if (name === query) score += 100;
+      if (compactName.includes(compactQuery)) score += 50;
+      for (const token of queryTokens) {
+        if (tokens.includes(token)) score += 25;
+        else if (tokens.some((nameToken) => nameToken.includes(token))) score += 10;
+      }
+
+      return { assignee, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return scored[0]?.assignee.accountId || null;
 }
 
 function makeOption(text, value) {
